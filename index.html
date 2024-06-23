@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic WebGL 2D Particle Sheet Simulator (Ceiling-Attached)</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        label { display: block; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; }
+    </style>
+</head>
+<body>
+    <canvas id="glCanvas"></canvas>
+    <div id="controls">
+        <label for="gravity">Gravity: <span id="gravityValue">200</span></label>
+        <input type="range" id="gravity" min="0" max="500" value="200">
+        
+        <label for="damping">Damping: <span id="dampingValue">0.999</span></label>
+        <input type="range" id="damping" min="0.9" max="0.9999" step="0.0001" value="0.999">
+        
+        <label for="stiffness">Spring Stiffness: <span id="stiffnessValue">1500</span></label>
+        <input type="range" id="stiffness" min="500" max="3000" value="1500">
+
+        <label for="maxTension">Max Tension: <span id="maxTensionValue">2</span></label>
+        <input type="range" id="maxTension" min="0.1" max="100" step="0.1" value="2">
+    </div>
+    <script>
+        const vertexShaderSource = `
+            attribute vec2 a_position;
+            attribute vec4 a_color;
+            uniform vec2 u_resolution;
+            varying vec4 v_color;
+            
+            void main() {
+                vec2 zeroToOne = a_position / u_resolution;
+                vec2 zeroToTwo = zeroToOne * 2.0;
+                vec2 clipSpace = zeroToTwo - 1.0;
+                gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+                gl_PointSize = 2.0;
+                v_color = a_color;
+            }
+        `;
+
+        const fragmentShaderSource = `
+            precision mediump float;
+            varying vec4 v_color;
+            
+            void main() {
+                gl_FragColor = v_color;
+            }
+        `;
+
+        const canvas = document.getElementById('glCanvas');
+        const gl = canvas.getContext('webgl');
+
+        if (!gl) {
+            alert('Unable to initialize WebGL. Your browser may not support it.');
+        }
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('An error occurred compiling the shaders: ' + gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vertexShader, fragmentShader) {
+            const program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Unable to initialize the shader program: ' + gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+        const program = createProgram(gl, vertexShader, fragmentShader);
+
+        const positionAttributeLocation = gl.getAttribLocation(program, 'a_position');
+        const colorAttributeLocation = gl.getAttribLocation(program, 'a_color');
+        const resolutionUniformLocation = gl.getUniformLocation(program, 'u_resolution');
+
+        const positionBuffer = gl.createBuffer();
+        const colorBuffer = gl.createBuffer();
+
+        class Particle {
+            constructor(x, y) {
+                this.pos = new Float32Array([x, y]);
+                this.vel = new Float32Array([0, 0]);
+                this.acc = new Float32Array([0, 0]);
+                this.mass = 1;
+                this.fixed = false;
+            }
+
+            update(dt) {
+                if (!this.fixed) {
+                    this.vel[0] += this.acc[0] * dt;
+                    this.vel[1] += this.acc[1] * dt;
+                    this.vel[0] *= DAMPING;
+                    this.vel[1] *= DAMPING;
+                    this.pos[0] += this.vel[0] * dt;
+                    this.pos[1] += this.vel[1] * dt;
+                    this.acc[0] = 0;
+                    this.acc[1] = 0;
+                }
+            }
+
+            applyForce(force) {
+                this.acc[0] += force[0] / this.mass;
+                this.acc[1] += force[1] / this.mass;
+            }
+        }
+
+        class Spring {
+            constructor(p1, p2, restLength) {
+                this.p1 = p1;
+                this.p2 = p2;
+                this.restLength = restLength;
+                this.broken = false;
+                this.tension = 0;
+            }
+
+            update() {
+                if (this.broken) return;
+                const dx = this.p2.pos[0] - this.p1.pos[0];
+                const dy = this.p2.pos[1] - this.p1.pos[1];
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const forceMagnitude = SPRING_STIFFNESS * (distance - this.restLength);
+                const forceX = (forceMagnitude * dx) / distance;
+                const forceY = (forceMagnitude * dy) / distance;
+
+                this.p1.applyForce([forceX, forceY]);
+                this.p2.applyForce([-forceX, -forceY]);
+
+                this.tension = Math.abs(distance - this.restLength) / this.restLength;
+                
+                // Check if the spring should break
+                if (this.tension > MAX_TENSION) {
+                    this.broken = true;
+                }
+            }
+        }
+
+        class ParticleSheet {
+            constructor(rows, cols, spacing) {
+                this.particles = new Array(rows * cols);
+                this.springs = [];
+                this.rows = rows;
+                this.cols = cols;
+
+                for (let i = 0; i < rows; i++) {
+                    for (let j = 0; j < cols; j++) {
+                        const particle = new Particle(j * spacing + canvas.width / 4, i * spacing + canvas.height / 10);
+                        if (i === 0) {
+                            particle.fixed = true;
+                        }
+                        this.particles[i * cols + j] = particle;
+                    }
+                }
+
+                for (let i = 0; i < rows; i++) {
+                    for (let j = 0; j < cols; j++) {
+                        if (j < cols - 1) {
+                            this.springs.push(new Spring(
+                                this.particles[i * cols + j],
+                                this.particles[i * cols + j + 1],
+                                spacing
+                            ));
+                        }
+                        if (i < rows - 1) {
+                            this.springs.push(new Spring(
+                                this.particles[i * cols + j],
+                                this.particles[(i + 1) * cols + j],
+                                spacing
+                            ));
+                        }
+                    }
+                }
+
+                this.particlePositions = new Float32Array(rows * cols * 2);
+                this.springPositions = new Float32Array(this.springs.length * 4);
+                this.springColors = new Float32Array(this.springs.length * 8);
+                this.activeSprings = this.springs.length;
+            }
+
+            update(dt) {
+                const substeps = 8;
+                const subDt = dt / substeps;
+                
+                for (let step = 0; step < substeps; step++) {
+                    for (const spring of this.springs) {
+                        spring.update();
+                    }
+
+                    for (const particle of this.particles) {
+                        particle.applyForce([0, GRAVITY * particle.mass]);
+                        particle.update(subDt);
+
+                        if (particle.pos[1] > canvas.height) {
+                            particle.pos[1] = canvas.height;
+                            particle.vel[1] *= -0.8;
+                        }
+                    }
+                }
+            }
+
+            updateBuffers() {
+                let particleIndex = 0;
+                let springIndex = 0;
+                let colorIndex = 0;
+
+                for (const particle of this.particles) {
+                    this.particlePositions[particleIndex++] = particle.pos[0];
+                    this.particlePositions[particleIndex++] = particle.pos[1];
+                }
+
+                this.activeSprings = 0;
+                for (const spring of this.springs) {
+                    if (!spring.broken) {
+                        this.springPositions[springIndex++] = spring.p1.pos[0];
+                        this.springPositions[springIndex++] = spring.p1.pos[1];
+                        this.springPositions[springIndex++] = spring.p2.pos[0];
+                        this.springPositions[springIndex++] = spring.p2.pos[1];
+
+                        const color = this.getTensionColor(spring.tension);
+                        this.springColors[colorIndex++] = color[0];
+                        this.springColors[colorIndex++] = color[1];
+                        this.springColors[colorIndex++] = color[2];
+                        this.springColors[colorIndex++] = color[3];
+                        this.springColors[colorIndex++] = color[0];
+                        this.springColors[colorIndex++] = color[1];
+                        this.springColors[colorIndex++] = color[2];
+                        this.springColors[colorIndex++] = color[3];
+
+                        this.activeSprings++;
+                    }
+                }
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, this.particlePositions, gl.DYNAMIC_DRAW);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, this.springColors, gl.DYNAMIC_DRAW);
+            }
+
+            getTensionColor(tension) {
+                const r = Math.min(tension/MAX_TENSION * 5, 1);
+                const g = Math.max(1 - tension/MAX_TENSION * 5, 0);
+                const b = 0;
+                return [r, g, b, 1];
+            }
+
+            draw() {
+                // Draw springs
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, this.springPositions, gl.DYNAMIC_DRAW);
+                gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(positionAttributeLocation);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, this.springColors, gl.DYNAMIC_DRAW);
+                gl.vertexAttribPointer(colorAttributeLocation, 4, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(colorAttributeLocation);
+
+                gl.drawArrays(gl.LINES, 0, this.activeSprings * 2);
+
+                // Draw particles
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, this.particlePositions, gl.DYNAMIC_DRAW);
+                gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(positionAttributeLocation);
+
+                gl.vertexAttrib4f(colorAttributeLocation, 1.0, 1.0, 1.0, 1.0);
+                gl.disableVertexAttribArray(colorAttributeLocation);
+
+                gl.drawArrays(gl.POINTS, 0, this.particles.length);
+            }
+
+            findNearestParticle(x, y) {
+                let nearestParticle = null;
+                let minDistance = Infinity;
+
+                for (const particle of this.particles) {
+                    const dx = particle.pos[0] - x;
+                    const dy = particle.pos[1] - y;
+                    const distance = dx * dx + dy * dy;
+
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        nearestParticle = particle;
+                    }
+                }
+
+                return minDistance < 400 ? nearestParticle : null;
+            }
+
+            cutSprings(x, y) {
+                const CUT_DISTANCE_SQ = 100;
+                for (const spring of this.springs) {
+                    if (!spring.broken) {
+                        const x1 = spring.p1.pos[0];
+                        const y1 = spring.p1.pos[1];
+                        const x2 = spring.p2.pos[0];
+                        const y2 = spring.p2.pos[1];
+
+                        const distanceSq = distanceToLineSegmentSquared(x, y, x1, y1, x2, y2);
+                        if (distanceSq < CUT_DISTANCE_SQ) {
+                            spring.broken = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        function distanceToLineSegmentSquared(x, y, x1, y1, x2, y2) {
+            const A = x - x1;
+            const B = y - y1;
+            const C = x2 - x1;
+            const D = y2 - y1;
+
+            const dot = A * C + B * D;
+            const len_sq = C * C + D * D;
+            let param = -1;
+            if (len_sq !== 0) param = dot / len_sq;
+
+            let xx, yy;
+
+            if (param < 0) {
+                xx = x1;
+                yy = y1;
+            }
+            else if (param > 1) {
+                xx = x2;
+                yy = y2;
+            }
+            else {
+                xx = x1 + param * C;
+                yy = y1 + param * D;
+            }
+
+            const dx = x - xx;
+            const dy = y - yy;
+            return dx * dx + dy * dy;
+        }
+
+        let GRAVITY = 200.0;
+        let DAMPING = 0.999;
+        let SPRING_STIFFNESS = 1500.0;
+        let MAX_TENSION = 2;
+
+        const sheet = new ParticleSheet(60, 300, 8);
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        let isDragging = false;
+        let draggedParticle = null;
+        let isCutting = false;
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) { // Left mouse button
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                draggedParticle = sheet.findNearestParticle(x, y);
+                if (draggedParticle && !draggedParticle.fixed) {
+                    isDragging = true;
+                }
+            } else if (e.button === 2) { // Right mouse button
+                isCutting = true;
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (isDragging && draggedParticle) {
+                draggedParticle.pos[0] = x;
+                draggedParticle.pos[1] = y;
+                draggedParticle.vel[0] = 0;
+                draggedParticle.vel[1] = 0;
+            }
+
+            if (isCutting) {
+                sheet.cutSprings(x, y);
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false;
+            isCutting = false;
+            draggedParticle = null;
+        });
+
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+
+        // UI Controls
+        const gravitySlider = document.getElementById('gravity');
+        const dampingSlider = document.getElementById('damping');
+        const stiffnessSlider = document.getElementById('stiffness');
+        const gravityValue = document.getElementById('gravityValue');
+        const dampingValue = document.getElementById('dampingValue');
+        const stiffnessValue = document.getElementById('stiffnessValue');
+        const maxTensionSlider = document.getElementById('maxTension');
+        const maxTensionValue = document.getElementById('maxTensionValue');
+
+        gravitySlider.addEventListener('input', () => {
+            GRAVITY = parseFloat(gravitySlider.value);
+            gravityValue.textContent = GRAVITY.toFixed(1);
+        });
+
+        dampingSlider.addEventListener('input', () => {
+            DAMPING = parseFloat(dampingSlider.value);
+            dampingValue.textContent = DAMPING.toFixed(4);
+        });
+
+        stiffnessSlider.addEventListener('input', () => {
+            SPRING_STIFFNESS = parseFloat(stiffnessSlider.value);
+            stiffnessValue.textContent = SPRING_STIFFNESS.toFixed(0);
+        });
+
+
+        maxTensionSlider.addEventListener('input', () => {
+            MAX_TENSION = parseFloat(maxTensionSlider.value);
+            maxTensionValue.textContent = MAX_TENSION.toFixed(1);
+        });
+
+        let lastTime = 0;
+        function render(currentTime) {
+            currentTime *= 0.001;
+            const deltaTime = Math.min(currentTime - lastTime, 0.1);
+            lastTime = currentTime;
+
+            sheet.update(deltaTime);
+            sheet.updateBuffers();
+
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.useProgram(program);
+            gl.uniform2f(resolutionUniformLocation, canvas.width, canvas.height);
+
+            sheet.draw();
+
+            requestAnimationFrame(render);
+        }
+
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>
