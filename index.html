@@ -110,10 +110,11 @@
                 this.acc = new Float32Array([0, 0]);
                 this.mass = 1;
                 this.fixed = false;
+                this.isDragged = false;  // New property to track if the particle is being dragged
             }
 
             update(dt) {
-                if (!this.fixed) {
+                if (!this.fixed && !this.isDragged) {  // Don't update if the particle is being dragged
                     this.vel[0] += this.acc[0] * dt;
                     this.vel[1] += this.acc[1] * dt;
                     this.vel[0] *= DAMPING;
@@ -126,8 +127,10 @@
             }
 
             applyForce(force) {
-                this.acc[0] += force[0] / this.mass;
-                this.acc[1] += force[1] / this.mass;
+                if (!this.isDragged) {  // Don't apply forces if the particle is being dragged
+                    this.acc[0] += force[0] / this.mass;
+                    this.acc[1] += force[1] / this.mass;
+                }
             }
         }
 
@@ -213,7 +216,9 @@
                     }
 
                     for (const particle of this.particles) {
-                        particle.applyForce([0, GRAVITY * particle.mass]);
+                        if (!particle.isDragged) {  // Only apply gravity if the particle is not being dragged
+                            particle.applyForce([0, GRAVITY * particle.mass]);
+                        }
                         particle.update(subDt);
 
                         if (particle.pos[1] > canvas.height) {
@@ -391,6 +396,7 @@
                 draggedParticle = sheet.findNearestParticle(x, y);
                 if (draggedParticle && !draggedParticle.fixed) {
                     isDragging = true;
+                    draggedParticle.isDragged = true;  // Set the dragged state
                 }
             } else if (e.button === 2) { // Right mouse button
                 isCutting = true;
@@ -414,16 +420,22 @@
             }
         });
 
-        canvas.addEventListener('mouseup', () => {
-            isDragging = false;
-            isCutting = false;
-            draggedParticle = null;
+        canvas.addEventListener('mouseup', (e) => {
+            if (e.button === 0) { // Left mouse button
+                if (draggedParticle) {
+                    draggedParticle.isDragged = false;  // Reset the dragged state
+                }
+                isDragging = false;
+                draggedParticle = null;
+            } else if (e.button === 2) { // Right mouse button
+                isCutting = false;
+            }
         });
 
         canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
+            return false;
         });
-
         // UI Controls
         const gravitySlider = document.getElementById('gravity');
         const dampingSlider = document.getElementById('damping');
