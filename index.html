@@ -15,13 +15,33 @@
             color: white;
             padding: 10px;
             border-radius: 5px;
+            max-height: 90vh;
+            overflow-y: auto;
+            transition: transform 0.3s ease-in-out;
+        }
+        #controls.hidden {
+            transform: translateX(-100%);
+        }
+        #toggleControls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 5px;
+            cursor: pointer;
         }
         label { display: block; margin-bottom: 5px; }
         input[type="range"] { width: 100%; }
+        button { margin-top: 10px; }
     </style>
 </head>
 <body>
     <canvas id="glCanvas"></canvas>
+    <button id="toggleControls">Toggle Controls</button>
     <div id="controls">
         <label for="gravity">Gravity: <span id="gravityValue">200</span></label>
         <input type="range" id="gravity" min="0" max="500" value="200">
@@ -30,10 +50,21 @@
         <input type="range" id="damping" min="0.9" max="0.9999" step="0.0001" value="0.999">
         
         <label for="stiffness">Spring Stiffness: <span id="stiffnessValue">1500</span></label>
-        <input type="range" id="stiffness" min="500" max="3000" value="1500">
+        <input type="range" id="stiffness" min="500" max="30000" value="1500">
 
         <label for="maxTension">Max Tension: <span id="maxTensionValue">2</span></label>
-        <input type="range" id="maxTension" min="0.1" max="100" step="0.1" value="2">
+        <input type="range" id="maxTension" min="0.1" max="1000" step="0.1" value="2">
+
+        <label for="rows">Rows: <span id="rowsValue">60</span></label>
+        <input type="range" id="rows" min="10" max="100" value="60">
+
+        <label for="cols">Columns: <span id="colsValue">300</span></label>
+        <input type="range" id="cols" min="50" max="500" value="300">
+
+        <label for="spacing">Spacing: <span id="spacingValue">8</span></label>
+        <input type="range" id="spacing" min="1" max="20" value="8">
+
+        <button id="resetSimulation">Reset Simulation</button>
     </div>
     <script>
         const vertexShaderSource = `
@@ -166,14 +197,22 @@
 
         class ParticleSheet {
             constructor(rows, cols, spacing) {
+                this.init(rows, cols, spacing);
+            }
+
+            init(rows, cols, spacing) {
                 this.particles = new Array(rows * cols);
                 this.springs = [];
                 this.rows = rows;
                 this.cols = cols;
+                this.spacing = spacing;
+
+                const startX = (canvas.width - (cols - 1) * spacing) / 2;
+                const startY = 10; // Start from the top with a small margin
 
                 for (let i = 0; i < rows; i++) {
                     for (let j = 0; j < cols; j++) {
-                        const particle = new Particle(j * spacing + canvas.width / 4, i * spacing + canvas.height / 10);
+                        const particle = new Particle(startX + j * spacing, startY + i * spacing);
                         if (i === 0) {
                             particle.fixed = true;
                         }
@@ -372,13 +411,17 @@
         let DAMPING = 0.999;
         let SPRING_STIFFNESS = 1500.0;
         let MAX_TENSION = 2;
+        let ROWS = 60;
+        let COLS = 300;
+        let SPACING = 8;
 
-        const sheet = new ParticleSheet(60, 300, 8);
+        let sheet = new ParticleSheet(ROWS, COLS, SPACING);
 
         function resizeCanvas() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
             gl.viewport(0, 0, canvas.width, canvas.height);
+            sheet = new ParticleSheet(ROWS, COLS, SPACING); // Recreate sheet on resize
         }
 
         window.addEventListener('resize', resizeCanvas);
@@ -440,11 +483,21 @@
         const gravitySlider = document.getElementById('gravity');
         const dampingSlider = document.getElementById('damping');
         const stiffnessSlider = document.getElementById('stiffness');
+        const maxTensionSlider = document.getElementById('maxTension');
+        const rowsSlider = document.getElementById('rows');
+        const colsSlider = document.getElementById('cols');
+        const spacingSlider = document.getElementById('spacing');
+        const resetButton = document.getElementById('resetSimulation');
+        const toggleControlsButton = document.getElementById('toggleControls');
+        const controlsPanel = document.getElementById('controls');
+
         const gravityValue = document.getElementById('gravityValue');
         const dampingValue = document.getElementById('dampingValue');
         const stiffnessValue = document.getElementById('stiffnessValue');
-        const maxTensionSlider = document.getElementById('maxTension');
         const maxTensionValue = document.getElementById('maxTensionValue');
+        const rowsValue = document.getElementById('rowsValue');
+        const colsValue = document.getElementById('colsValue');
+        const spacingValue = document.getElementById('spacingValue');
 
         gravitySlider.addEventListener('input', () => {
             GRAVITY = parseFloat(gravitySlider.value);
@@ -461,10 +514,50 @@
             stiffnessValue.textContent = SPRING_STIFFNESS.toFixed(0);
         });
 
-
         maxTensionSlider.addEventListener('input', () => {
             MAX_TENSION = parseFloat(maxTensionSlider.value);
             maxTensionValue.textContent = MAX_TENSION.toFixed(1);
+        });
+
+        rowsSlider.addEventListener('input', () => {
+            ROWS = parseInt(rowsSlider.value);
+            rowsValue.textContent = ROWS;
+        });
+
+        colsSlider.addEventListener('input', () => {
+            COLS = parseInt(colsSlider.value);
+            colsValue.textContent = COLS;
+        });
+
+        spacingSlider.addEventListener('input', () => {
+            SPACING = parseInt(spacingSlider.value);
+            spacingValue.textContent = SPACING;
+        });
+
+        resetButton.addEventListener('click', () => {
+            sheet = new ParticleSheet(ROWS, COLS, SPACING);
+        });
+
+        toggleControlsButton.addEventListener('click', () => {
+            controlsPanel.classList.toggle('hidden');
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) { // Left mouse button
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                draggedParticle = sheet.findNearestParticle(x, y);
+                if (draggedParticle) {
+                    isDragging = true;
+                    draggedParticle.isDragged = true;
+                    if (e.shiftKey) {
+                        draggedParticle.fixed = !draggedParticle.fixed;
+                    }
+                }
+            } else if (e.button === 2) { // Right mouse button
+                isCutting = true;
+            }
         });
 
         let lastTime = 0;
